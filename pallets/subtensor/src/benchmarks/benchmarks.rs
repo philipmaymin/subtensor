@@ -10,6 +10,7 @@
 use crate::Pallet as Subtensor;
 use crate::staking::lock::LockState;
 use crate::subnets::mechanism::GLOBAL_MAX_SUBNET_COUNT;
+use crate::subnets::subnet::NetworkRegistrationInfo;
 use crate::*;
 use codec::{Compact, Encode};
 use frame_benchmarking::v2::*;
@@ -1282,6 +1283,40 @@ mod pallet_benchmarks {
             hot.clone(),
             AlphaBalance::from(1_000_000u64),
         );
+    }
+
+    #[benchmark]
+    fn match_subnet_registration_challenge() {
+        let owner: T::AccountId = whitelisted_caller();
+        let challenger: T::AccountId = account("Challenger", 0, 1);
+        let challenger_hotkey: T::AccountId = account("ChallengerHot", 0, 2);
+        let netuid = NetUid::from(1);
+        let lock_amount: TaoBalance = 100_000_000_000u64.into();
+
+        SubtokenEnabled::<T>::insert(netuid, true);
+        Subtensor::<T>::init_new_network(netuid, 1);
+        SubnetOwner::<T>::insert(netuid, owner.clone());
+        add_balance_to_coldkey_account::<T>(&owner, lock_amount.to_u64().saturating_mul(2).into());
+
+        ContestedSubnet::<T>::insert(
+            netuid,
+            (
+                NetworkRegistrationInfo::<T::AccountId> {
+                    coldkey: challenger,
+                    hotkey: challenger_hotkey,
+                    mechid: 1,
+                    identity: None,
+                    lock_amount,
+                    median_subnet_alpha_price: U64F64::saturating_from_num(1),
+                    registration_block: 0,
+                    lock_id: 0,
+                },
+                u64::MAX,
+            ),
+        );
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(owner.clone()), netuid);
     }
 
     #[benchmark]

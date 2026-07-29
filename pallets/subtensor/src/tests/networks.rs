@@ -3,6 +3,7 @@
 use super::mock::*;
 use crate::migrations::migrate_network_immunity_period;
 use crate::staking::lock::LockState;
+use crate::subnets::subnet::SUBNET_CHALLENGE_WINDOW;
 use crate::*;
 use frame_support::{assert_err, assert_ok, weights::Weight};
 use frame_system::Config;
@@ -3507,6 +3508,16 @@ fn register_network_prune_registers_registration_queued() {
             None,
         ));
 
+        // The eviction is now offered to n1's owner first, so the registration parks in
+        // `ContestedSubnet` and n1 stays alive for the length of the match window.
+        let (_, deadline) = ContestedSubnet::<Test>::get(n1).expect("challenge recorded");
+        assert!(NetworkRegistrationQueue::<Test>::get().is_empty());
+        assert!(NetworksAdded::<Test>::get(n1));
+
+        // Unmatched, the prune path must still reach the same end state it always did.
+        System::set_block_number(deadline);
+        SubtensorModule::process_subnet_challenges();
+
         assert!(NetworkRegistrationQueue::<Test>::get().len() == 1);
         assert!(DissolveCleanupQueue::<Test>::get().contains(&n1));
         assert!(!NetworksAdded::<Test>::get(n1));
@@ -3859,5 +3870,354 @@ fn process_network_registration_queue_unlocks_funds_and_charges_coldkey() {
             .expect("queued registration should create a new subnet");
         assert_eq!(SubnetOwner::<Test>::get(new_netuid), cold);
         assert_eq!(SubnetLocked::<Test>::get(new_netuid), queued_lock);
+    });
+}
+
+// --- Subnet owner right of first refusal ---------------------------------------------
+//
+// These tests encode why the challenge window exists: a registration at the subnet limit
+// must not destroy a live subnet before its owner has been given the chance to pay the
+// same price the challenger did.
+
+/// Sets up a subnet at the limit facing a challenge, returning (target, challenger, lock).
+#[allow(clippy::arithmetic_side_effects)]
+fn challenge_setup() -> (NetUid, U256, TaoBalance) {
+    let target = add_dynamic_network(&U256::from(20), &U256::from(10));
+    let owner = U256::from(10);
+    SubnetOwner::<Test>::insert(target, owner);
+
+    let imm = SubtensorModule::get_network_immunity_period();
+    System::set_block_number(imm + 10);
+    SubnetMovingPrice::<Test>::insert(target, I96F32::from_num(1));
+
+    let challenger = U256::from(999);
+    let challenger_hotkey = U256::from(998);
+    let lock = SubtensorModule::get_network_lock_cost();
+    add_balance_to_coldkey_account(&challenger, TaoBalance::from(lock.to_u64() * 4));
+
+    // Force the limit so the next registration must evict something.
+    SubnetLimit::<Test>::put(1);
+    assert_ok!(SubtensorModule::register_network(
+        <<Test as Config>::RuntimeOrigin>::signed(challenger),
+        challenger_hotkey
+    ));
+
+    (target, challenger, lock)
+}
+
+#[test]
+fn challenge_defers_dissolution_instead_of_destroying_the_subnet() {
+    new_test_ext(0).execute_with(|| {
+        let (target, challenger, lock) = challenge_setup();
+
+        // The whole point: the subnet is still alive after the registration call.
+        assert!(SubtensorModule::if_subnet_exist(target));
+
+        let (info, deadline) = ContestedSubnet::<Test>::get(target).expect("challenge recorded");
+        assert_eq!(info.coldkey, challenger);
+        assert_eq!(info.lock_amount, lock);
+        assert_eq!(deadline, System::block_number() + SUBNET_CHALLENGE_WINDOW);
+
+        // A contested subnet is not offered up a second time, so two challengers can
+        // never both be waiting on the same owner's decision.
+        assert_eq!(SubtensorModule::get_network_to_prune(), None);
+    });
+}
+
+#[test]
+fn owner_matching_keeps_the_subnet_and_earns_full_immunity() {
+    new_test_ext(0).execute_with(|| {
+        let (target, challenger, lock) = challenge_setup();
+        let owner = SubnetOwner::<Test>::get(target);
+        add_balance_to_coldkey_account(&owner, TaoBalance::from(lock.to_u64() * 2));
+
+        let owner_balance_before = SubtensorModule::get_coldkey_balance(&owner);
+        let subnet_account = SubtensorModule::get_subnet_account_id(target).expect("subnet acct");
+        let pool_balance_before = SubtensorModule::get_coldkey_balance(&subnet_account);
+        let registered_at_before = NetworkRegisteredAt::<Test>::get(target);
+
+        assert_ok!(SubtensorModule::match_subnet_registration_challenge(
+            <<Test as Config>::RuntimeOrigin>::signed(owner),
+            target
+        ));
+
+        assert!(SubtensorModule::if_subnet_exist(target));
+        assert!(ContestedSubnet::<Test>::get(target).is_none());
+
+        // The owner pays the challenger's full price and it lands in the subnet, exactly
+        // as the challenger's lock would have capitalised the replacement subnet's pool.
+        // Asserted on balances rather than `SubnetTAO` because the injection is routed
+        // through the swap balancer, which may hold part of it in the reservoir.
+        assert_eq!(
+            SubtensorModule::get_coldkey_balance(&owner),
+            TaoBalance::from(owner_balance_before.to_u64() - lock.to_u64())
+        );
+        assert_eq!(
+            SubtensorModule::get_coldkey_balance(&subnet_account),
+            TaoBalance::from(pool_balance_before.to_u64() + lock.to_u64())
+        );
+
+        // Immunity is granted without disturbing `NetworkRegisteredAt`, which gates the
+        // start_call delay, the legacy lock refund and the conviction ownership handover.
+        assert_eq!(
+            NetworkRegisteredAt::<Test>::get(target),
+            registered_at_before
+        );
+        assert_eq!(
+            NetworkImmuneUntil::<Test>::get(target),
+            System::block_number() + SubtensorModule::get_network_immunity_period()
+        );
+        assert_eq!(SubtensorModule::get_network_to_prune(), None);
+
+        // The challenger is made whole rather than paid, so challenging cannot become a
+        // way to extract value from incumbents.
+        assert_eq!(Balances::locks(&challenger).len(), 0);
+    });
+}
+
+/// Granted immunity must not outlive the subnet it was granted to. `get_next_netuid`
+/// hands out the lowest free netuid, so a dissolved netuid is recycled; a surviving
+/// `NetworkImmuneUntil` entry would leak state onto whatever subnet inherits the id.
+#[test]
+fn granted_immunity_is_cleared_when_the_subnet_is_dissolved() {
+    new_test_ext(0).execute_with(|| {
+        let (target, _challenger, lock) = challenge_setup();
+        let owner = SubnetOwner::<Test>::get(target);
+        add_balance_to_coldkey_account(&owner, TaoBalance::from(lock.to_u64() * 2));
+
+        assert_ok!(SubtensorModule::match_subnet_registration_challenge(
+            <<Test as Config>::RuntimeOrigin>::signed(owner),
+            target
+        ));
+        assert!(NetworkImmuneUntil::<Test>::get(target) > 0);
+
+        assert_ok!(SubtensorModule::do_dissolve_network(target));
+        destroy_alpha_in_out_stakes_full_pipeline_for_test(target);
+        SubtensorModule::remove_data_for_dissolved_networks(Weight::MAX);
+
+        assert!(!SubtensorModule::if_subnet_exist(target));
+        assert_eq!(NetworkImmuneUntil::<Test>::get(target), 0);
+    });
+}
+
+#[test]
+fn unmatched_challenge_dissolves_on_expiry_and_releases_the_registration() {
+    new_test_ext(0).execute_with(|| {
+        let (target, challenger, _lock) = challenge_setup();
+        let (_, deadline) = ContestedSubnet::<Test>::get(target).expect("challenge recorded");
+
+        // Before the deadline nothing happens; the owner still has time.
+        SubtensorModule::process_subnet_challenges();
+        assert!(SubtensorModule::if_subnet_exist(target));
+
+        System::set_block_number(deadline);
+        SubtensorModule::process_subnet_challenges();
+
+        assert!(!SubtensorModule::if_subnet_exist(target));
+        assert!(ContestedSubnet::<Test>::get(target).is_none());
+
+        let queue = NetworkRegistrationQueue::<Test>::get();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].coldkey, challenger);
+    });
+}
+
+#[test]
+fn only_the_owner_may_match_and_only_before_the_deadline() {
+    new_test_ext(0).execute_with(|| {
+        let (target, _challenger, lock) = challenge_setup();
+        let owner = SubnetOwner::<Test>::get(target);
+        let stranger = U256::from(4242);
+        add_balance_to_coldkey_account(&stranger, TaoBalance::from(lock.to_u64() * 2));
+        add_balance_to_coldkey_account(&owner, TaoBalance::from(lock.to_u64() * 2));
+
+        // A non-owner cannot buy the incumbent's defence, even funded. In particular this
+        // keeps a conviction leader from using a challenge they triggered themselves as a
+        // route to seizing the subnet.
+        assert_err!(
+            SubtensorModule::match_subnet_registration_challenge(
+                <<Test as Config>::RuntimeOrigin>::signed(stranger),
+                target
+            ),
+            Error::<Test>::NotSubnetOwner
+        );
+
+        let (_, deadline) = ContestedSubnet::<Test>::get(target).expect("challenge recorded");
+        System::set_block_number(deadline);
+        assert_err!(
+            SubtensorModule::match_subnet_registration_challenge(
+                <<Test as Config>::RuntimeOrigin>::signed(owner),
+                target
+            ),
+            Error::<Test>::SubnetChallengeExpired
+        );
+    });
+}
+
+#[test]
+fn matching_requires_the_full_lock_amount() {
+    new_test_ext(0).execute_with(|| {
+        let (target, _challenger, lock) = challenge_setup();
+        let owner = SubnetOwner::<Test>::get(target);
+
+        // Funded, but short of the challenger's price: a partial payment must not buy a
+        // reprieve, or the match stops being a match.
+        add_balance_to_coldkey_account(&owner, TaoBalance::from(lock.to_u64() / 2));
+
+        assert_err!(
+            SubtensorModule::match_subnet_registration_challenge(
+                <<Test as Config>::RuntimeOrigin>::signed(owner),
+                target
+            ),
+            Error::<Test>::CannotAffordLockCost
+        );
+        assert!(ContestedSubnet::<Test>::get(target).is_some());
+    });
+}
+
+#[test]
+fn matching_an_unchallenged_subnet_fails() {
+    new_test_ext(0).execute_with(|| {
+        let netuid = add_dynamic_network(&U256::from(20), &U256::from(10));
+        let owner = U256::from(10);
+        SubnetOwner::<Test>::insert(netuid, owner);
+
+        assert_err!(
+            SubtensorModule::match_subnet_registration_challenge(
+                <<Test as Config>::RuntimeOrigin>::signed(owner),
+                netuid
+            ),
+            Error::<Test>::SubnetNotChallenged
+        );
+    });
+}
+
+/// The affordability check and the transfer must agree on preservation mode. Holding
+/// exactly the lock amount is not enough, because the transfer will not spend the
+/// existential deposit, and a payment one rao short is not a match.
+#[test]
+fn matching_with_exactly_the_lock_amount_is_short_by_the_existential_deposit() {
+    new_test_ext(0).execute_with(|| {
+        let (target, _challenger, lock) = challenge_setup();
+
+        // A fresh owner holding exactly the lock and nothing more.
+        let owner = U256::from(31337);
+        SubnetOwner::<Test>::insert(target, owner);
+        add_balance_to_coldkey_account(&owner, lock);
+        assert_eq!(SubtensorModule::get_coldkey_balance(&owner), lock);
+
+        assert_err!(
+            SubtensorModule::match_subnet_registration_challenge(
+                <<Test as Config>::RuntimeOrigin>::signed(owner),
+                target
+            ),
+            Error::<Test>::CannotAffordLockCost
+        );
+
+        // The failed attempt must not have taken any of the owner's TAO on the way out.
+        assert_eq!(SubtensorModule::get_coldkey_balance(&owner), lock);
+        assert!(ContestedSubnet::<Test>::get(target).is_some());
+        assert!(SubtensorModule::if_subnet_exist(target));
+    });
+}
+
+/// The match payment is real user TAO, so it has to reach the reserve and `TotalStake`
+/// and must not be booked as protocol cost. `SubnetProtocolFlow` is subtracted from user
+/// demand when net flow is enabled, so recording it there would make defending a subnet
+/// reduce its own TAO injection.
+#[test]
+fn matching_credits_the_reserve_without_booking_protocol_cost() {
+    new_test_ext(0).execute_with(|| {
+        let (target, _challenger, lock) = challenge_setup();
+        let owner = SubnetOwner::<Test>::get(target);
+        add_balance_to_coldkey_account(&owner, TaoBalance::from(lock.to_u64() * 2));
+
+        let subnet_tao_before = SubnetTAO::<Test>::get(target);
+        let total_stake_before = SubtensorModule::get_total_stake();
+        let protocol_flow_before = SubnetProtocolFlow::<Test>::get(target);
+
+        assert_ok!(SubtensorModule::match_subnet_registration_challenge(
+            <<Test as Config>::RuntimeOrigin>::signed(owner),
+            target
+        ));
+
+        let credited = SubnetTAO::<Test>::get(target).to_u64() - subnet_tao_before.to_u64();
+        assert!(credited > 0);
+        assert_eq!(
+            SubtensorModule::get_total_stake().to_u64(),
+            total_stake_before.to_u64() + credited
+        );
+        assert_eq!(
+            SubnetProtocolFlow::<Test>::get(target),
+            protocol_flow_before
+        );
+    });
+}
+
+/// Parking a challenge consumes the registration opportunity for the whole window, so it
+/// has to advance the lock-cost clock the same way a completed registration does. Without
+/// this the price keeps decaying while challenges are outstanding: an owner could match at
+/// the floor forever instead of at a price that resets each time the slot is contested, and
+/// parking a challenge against every non-immune subnet at once, to force them all to pay,
+/// would cost no more than the first one.
+#[test]
+fn parking_a_challenge_advances_the_lock_cost_clock() {
+    new_test_ext(0).execute_with(|| {
+        let (_target, _challenger, lock) = challenge_setup();
+
+        assert_eq!(SubtensorModule::get_network_last_lock(), lock);
+        assert_eq!(
+            SubtensorModule::get_network_last_lock_block(),
+            System::block_number()
+        );
+
+        // `get_network_lock_cost` is `last_lock * 2` less decay, so the next challenger in
+        // the same block pays double. Parking n challenges at once costs 2^n, not n.
+        assert_eq!(
+            SubtensorModule::get_network_lock_cost(),
+            TaoBalance::from(lock.to_u64() * 2)
+        );
+    });
+}
+
+/// A challenge must not outlive the subnet it was made against. `get_next_netuid` reissues
+/// the lowest free netuid, so a challenge left behind by a root dissolution would attach to
+/// whatever subnet inherits the id: that subnet's owner could match a challenge nobody made
+/// against them, and the real challenger's registration would be discarded.
+#[test]
+fn dissolving_a_contested_subnet_promotes_the_registration_and_clears_the_challenge() {
+    new_test_ext(0).execute_with(|| {
+        let (target, challenger, _lock) = challenge_setup();
+        assert!(ContestedSubnet::<Test>::get(target).is_some());
+
+        assert_ok!(SubtensorModule::do_dissolve_network(target));
+
+        assert!(ContestedSubnet::<Test>::get(target).is_none());
+
+        let queue = NetworkRegistrationQueue::<Test>::get();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].coldkey, challenger);
+
+        // And the expiry pass must not promote the same registration a second time.
+        System::set_block_number(System::block_number() + SUBNET_CHALLENGE_WINDOW);
+        SubtensorModule::process_subnet_challenges();
+        assert_eq!(NetworkRegistrationQueue::<Test>::get().len(), 1);
+    });
+}
+
+/// The hook wiring is what makes challenges expire on chain. Without it every test that
+/// drives `process_subnet_challenges` directly still passes while no challenge ever
+/// resolves in production.
+#[test]
+fn challenges_expire_through_on_idle() {
+    new_test_ext(0).execute_with(|| {
+        let (target, _challenger, _lock) = challenge_setup();
+        let (_, deadline) = ContestedSubnet::<Test>::get(target).expect("challenge recorded");
+
+        System::set_block_number(deadline);
+        SubtensorModule::on_idle(System::block_number(), Weight::MAX);
+
+        assert!(!SubtensorModule::if_subnet_exist(target));
+        assert!(ContestedSubnet::<Test>::get(target).is_none());
     });
 }

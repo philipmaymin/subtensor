@@ -348,5 +348,9 @@ mod errors {
         ColdkeyCollateralPositionsFull,
         /// The coldkey has too many staking hotkeys for a single manual root claim.
         TooManyRootClaimHotkeys,
+        /// There is no open registration challenge against this subnet.
+        SubnetNotChallenged,
+        /// The window to match this registration challenge has already closed.
+        SubnetChallengeExpired,
     }
 }

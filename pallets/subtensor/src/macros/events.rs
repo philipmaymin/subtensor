@@ -745,5 +745,32 @@ mod events {
             /// The new floor; zero clears it.
             min_locked: AlphaBalance,
         },
+
+        /// A registration would evict this subnet. Its owner may match the lock to keep it.
+        /// Appended at the end of the enum to avoid shifting existing event indices.
+        SubnetRegistrationChallenged {
+            /// The subnet facing eviction.
+            netuid: NetUid,
+            /// The coldkey whose registration triggered the challenge.
+            challenger: T::AccountId,
+            /// The amount the owner must match to keep the subnet.
+            lock_amount: TaoBalance,
+            /// The block at which the match window closes.
+            deadline: u64,
+        },
+
+        /// A subnet owner matched a registration challenge and kept the subnet.
+        SubnetRegistrationChallengeMatched {
+            /// The subnet that was kept.
+            netuid: NetUid,
+            /// The owner coldkey that paid the match.
+            owner: T::AccountId,
+            /// The challenger whose lock was released.
+            challenger: T::AccountId,
+            /// The amount paid into the subnet reserve.
+            amount: TaoBalance,
+            /// The block until which the subnet is now immune from pruning.
+            immune_until: u64,
+        },
     }
 }

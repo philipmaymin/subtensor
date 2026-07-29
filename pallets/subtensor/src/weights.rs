@@ -68,6 +68,7 @@ pub trait WeightInfo {
 	fn transfer_stake_and_hotkey() -> Weight;
 	fn add_collateral() -> Weight;
 	fn set_min_collateral() -> Weight;
+	fn match_subnet_registration_challenge() -> Weight;
 	fn swap_stake() -> Weight;
 	fn batch_commit_weights() -> Weight;
 	fn batch_set_weights() -> Weight;
@@ -1846,6 +1847,43 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 		Weight::from_parts(21_000_000, 4480)
 			.saturating_add(T::DbWeight::get().reads(4_u64))
 			.saturating_add(T::DbWeight::get().writes(1_u64))
+	}
+	/// Storage: `SubtensorModule::NetworksAdded` (r:1 w:0)
+	/// Proof: `SubtensorModule::NetworksAdded` (`max_values`: None, `max_size`: None, mode: `Measured`)
+	/// Storage: `SubtensorModule::ContestedSubnet` (r:1 w:1)
+	/// Proof: `SubtensorModule::ContestedSubnet` (`max_values`: None, `max_size`: None, mode: `Measured`)
+	/// Storage: `SubtensorModule::SubnetOwner` (r:1 w:0)
+	/// Proof: `SubtensorModule::SubnetOwner` (`max_values`: None, `max_size`: None, mode: `Measured`)
+	/// Storage: `System::Account` (r:2 w:2)
+	/// Proof: `System::Account` (`max_values`: None, `max_size`: Some(104), added: 2579, mode: `MaxEncodedLen`)
+	/// Storage: `SubtensorModule::SubnetAlphaIn` (r:1 w:0)
+	/// Proof: `SubtensorModule::SubnetAlphaIn` (`max_values`: None, `max_size`: None, mode: `Measured`)
+	/// Storage: `SubtensorModule::SubnetTAO` (r:1 w:1)
+	/// Proof: `SubtensorModule::SubnetTAO` (`max_values`: None, `max_size`: None, mode: `Measured`)
+	/// Storage: `Swap::SwapBalancer` (r:1 w:1)
+	/// Proof: `Swap::SwapBalancer` (`max_values`: None, `max_size`: Some(18), added: 2493, mode: `MaxEncodedLen`)
+	/// Storage: `Swap::BalancerTaoReservoir` (r:1 w:1)
+	/// Proof: `Swap::BalancerTaoReservoir` (`max_values`: None, `max_size`: Some(18), added: 2493, mode: `MaxEncodedLen`)
+	/// Storage: `Swap::BalancerAlphaReservoir` (r:1 w:1)
+	/// Proof: `Swap::BalancerAlphaReservoir` (`max_values`: None, `max_size`: Some(18), added: 2493, mode: `MaxEncodedLen`)
+	/// Storage: `SubtensorModule::TotalStake` (r:1 w:1)
+	/// Proof: `SubtensorModule::TotalStake` (`max_values`: Some(1), `max_size`: None, mode: `Measured`)
+	/// Storage: `Balances::Locks` (r:1 w:1)
+	/// Proof: `Balances::Locks` (`max_values`: None, `max_size`: Some(899), added: 3374, mode: `MaxEncodedLen`)
+	/// Storage: `Balances::Freezes` (r:1 w:0)
+	/// Proof: `Balances::Freezes` (`max_values`: None, `max_size`: Some(499), added: 2974, mode: `MaxEncodedLen`)
+	/// Storage: `SubtensorModule::NetworkImmunityPeriod` (r:1 w:0)
+	/// Proof: `SubtensorModule::NetworkImmunityPeriod` (`max_values`: Some(1), `max_size`: None, mode: `Measured`)
+	/// Storage: `SubtensorModule::NetworkImmuneUntil` (r:0 w:1)
+	/// Proof: `SubtensorModule::NetworkImmuneUntil` (`max_values`: None, `max_size`: None, mode: `Measured`)
+	fn match_subnet_registration_challenge() -> Weight {
+		// Proof Size summary in bytes:
+		//  Measured:  `1145`
+		//  Estimated: `6148`
+		// Minimum execution time: 135_502_000 picoseconds.
+		Weight::from_parts(137_586_000, 6148)
+			.saturating_add(T::DbWeight::get().reads(14_u64))
+			.saturating_add(T::DbWeight::get().writes(10_u64))
 	}
 	/// Storage: `SubtensorModule::NetworksAdded` (r:2 w:0)
 	/// Proof: `SubtensorModule::NetworksAdded` (`max_values`: None, `max_size`: None, mode: `Measured`)
@@ -5460,6 +5498,43 @@ impl WeightInfo for () {
 		Weight::from_parts(21_000_000, 4480)
 			.saturating_add(RocksDbWeight::get().reads(4_u64))
 			.saturating_add(RocksDbWeight::get().writes(1_u64))
+	}
+	/// Storage: `SubtensorModule::NetworksAdded` (r:1 w:0)
+	/// Proof: `SubtensorModule::NetworksAdded` (`max_values`: None, `max_size`: None, mode: `Measured`)
+	/// Storage: `SubtensorModule::ContestedSubnet` (r:1 w:1)
+	/// Proof: `SubtensorModule::ContestedSubnet` (`max_values`: None, `max_size`: None, mode: `Measured`)
+	/// Storage: `SubtensorModule::SubnetOwner` (r:1 w:0)
+	/// Proof: `SubtensorModule::SubnetOwner` (`max_values`: None, `max_size`: None, mode: `Measured`)
+	/// Storage: `System::Account` (r:2 w:2)
+	/// Proof: `System::Account` (`max_values`: None, `max_size`: Some(104), added: 2579, mode: `MaxEncodedLen`)
+	/// Storage: `SubtensorModule::SubnetAlphaIn` (r:1 w:0)
+	/// Proof: `SubtensorModule::SubnetAlphaIn` (`max_values`: None, `max_size`: None, mode: `Measured`)
+	/// Storage: `SubtensorModule::SubnetTAO` (r:1 w:1)
+	/// Proof: `SubtensorModule::SubnetTAO` (`max_values`: None, `max_size`: None, mode: `Measured`)
+	/// Storage: `Swap::SwapBalancer` (r:1 w:1)
+	/// Proof: `Swap::SwapBalancer` (`max_values`: None, `max_size`: Some(18), added: 2493, mode: `MaxEncodedLen`)
+	/// Storage: `Swap::BalancerTaoReservoir` (r:1 w:1)
+	/// Proof: `Swap::BalancerTaoReservoir` (`max_values`: None, `max_size`: Some(18), added: 2493, mode: `MaxEncodedLen`)
+	/// Storage: `Swap::BalancerAlphaReservoir` (r:1 w:1)
+	/// Proof: `Swap::BalancerAlphaReservoir` (`max_values`: None, `max_size`: Some(18), added: 2493, mode: `MaxEncodedLen`)
+	/// Storage: `SubtensorModule::TotalStake` (r:1 w:1)
+	/// Proof: `SubtensorModule::TotalStake` (`max_values`: Some(1), `max_size`: None, mode: `Measured`)
+	/// Storage: `Balances::Locks` (r:1 w:1)
+	/// Proof: `Balances::Locks` (`max_values`: None, `max_size`: Some(899), added: 3374, mode: `MaxEncodedLen`)
+	/// Storage: `Balances::Freezes` (r:1 w:0)
+	/// Proof: `Balances::Freezes` (`max_values`: None, `max_size`: Some(499), added: 2974, mode: `MaxEncodedLen`)
+	/// Storage: `SubtensorModule::NetworkImmunityPeriod` (r:1 w:0)
+	/// Proof: `SubtensorModule::NetworkImmunityPeriod` (`max_values`: Some(1), `max_size`: None, mode: `Measured`)
+	/// Storage: `SubtensorModule::NetworkImmuneUntil` (r:0 w:1)
+	/// Proof: `SubtensorModule::NetworkImmuneUntil` (`max_values`: None, `max_size`: None, mode: `Measured`)
+	fn match_subnet_registration_challenge() -> Weight {
+		// Proof Size summary in bytes:
+		//  Measured:  `1145`
+		//  Estimated: `6148`
+		// Minimum execution time: 135_502_000 picoseconds.
+		Weight::from_parts(137_586_000, 6148)
+			.saturating_add(RocksDbWeight::get().reads(14_u64))
+			.saturating_add(RocksDbWeight::get().writes(10_u64))
 	}
 	/// Storage: `SubtensorModule::NetworksAdded` (r:2 w:0)
 	/// Proof: `SubtensorModule::NetworksAdded` (`max_values`: None, `max_size`: None, mode: `Measured`)

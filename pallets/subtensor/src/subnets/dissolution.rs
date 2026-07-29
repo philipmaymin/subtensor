@@ -133,6 +133,15 @@ impl<T: Config> Pallet<T> {
         dissolved_networks.push(netuid);
         DissolveCleanupQueue::<T>::set(dissolved_networks);
 
+        // A challenge must not outlive its target. `get_next_netuid` reissues the lowest free
+        // netuid, so a leftover challenge would attach to whatever subnet inherits this one:
+        // that owner could match a challenge nobody made against them, and the real
+        // challenger's registration would be discarded. Promote it instead, since the subnet
+        // it wanted gone is gone.
+        if let Some((info, _)) = ContestedSubnet::<T>::take(netuid) {
+            Self::queue_parked_registration(info);
+        }
+
         log::debug!("NetworkRemoved( netuid:{netuid:?} )");
 
         // --- Emit the NetworkRemoved event
@@ -264,7 +273,7 @@ impl<T: Config> Pallet<T> {
     pub fn remove_network_parameters(netuid: NetUid, weight_meter: &mut WeightMeter) -> bool {
         // Flat write charge for the `::remove(netuid)` list below. Bump this when
         // adding or removing entries from that list so the weight stays in step.
-        let removal_weight = T::DbWeight::get().writes(82);
+        let removal_weight = T::DbWeight::get().writes(83);
         if !weight_meter.can_consume(removal_weight) {
             return false;
         }
@@ -272,6 +281,7 @@ impl<T: Config> Pallet<T> {
         SubnetOwner::<T>::remove(netuid);
         SubnetworkN::<T>::remove(netuid);
         NetworkRegisteredAt::<T>::remove(netuid);
+        NetworkImmuneUntil::<T>::remove(netuid);
         Active::<T>::remove(netuid);
         Emission::<T>::remove(netuid);
         Consensus::<T>::remove(netuid);
