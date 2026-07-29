@@ -4,7 +4,12 @@ use safe_math::FixedExt;
 use sp_core::Get;
 use sp_runtime::{SaturatedConversion, traits::AccountIdConversion};
 use substrate_fixed::types::U64F64;
-use subtensor_runtime_common::{NetUid, TaoBalance};
+use subtensor_runtime_common::{AlphaBalance, NetUid, TaoBalance};
+use subtensor_swap_interface::SwapHandler;
+
+/// Blocks a subnet owner has to match a registration challenge before the eviction
+/// proceeds. 7200 blocks is roughly 24 hours at a 12 second block time.
+pub const SUBNET_CHALLENGE_WINDOW: u64 = 7200;
 
 /// Data structure for a pending network registration in the execution queue.
 #[crate::freeze_struct("c47fe93995c89025")]
@@ -216,12 +221,9 @@ impl<T: Config> Pallet<T> {
             Error::<T>::CannotAffordLockCost
         );
 
-        // --- 7. If we reach the limit and need prune a subnet, do it now.
-        if let Some(prune_netuid) = prune_netuid {
-            Self::do_dissolve_network(prune_netuid)?;
-        }
-
-        // can't get a netuid to register, so queue the registration
+        // --- 7. The registration cannot complete in this call when it is waiting on
+        //        cleanup, or when it would evict a live subnet and must first give that
+        //        subnet's owner a chance to match. Lock the cost either way.
         if wait_to_cleanup || prune_netuid.is_some() {
             let lock_id = NetworkRegistrationLockId::<T>::get();
             ensure!(lock_id != u32::MAX, Error::<T>::LockIdOverFlow);
@@ -240,6 +242,31 @@ impl<T: Config> Pallet<T> {
                 registration_block: current_block,
                 lock_id,
             };
+
+            // --- 7a. Right of first refusal: park the registration instead of dissolving
+            //         the incumbent here, giving its owner `SUBNET_CHALLENGE_WINDOW` blocks
+            //         to match `lock_amount` and keep the slot.
+            if let Some(prune_netuid) = prune_netuid {
+                let deadline = current_block.saturating_add(SUBNET_CHALLENGE_WINDOW);
+                ContestedSubnet::<T>::insert(prune_netuid, (info, deadline));
+
+                // A parked challenge consumes the registration opportunity for the window, so
+                // it advances the lock-cost clock as a completed registration would. This is
+                // what prices the mechanism: the cost doubles, so challenging every
+                // non-immune subnet at once costs 2^n, and an owner cannot sit at the decayed
+                // floor because the price resets each time the slot is contested.
+                Self::set_network_last_lock(lock_amount);
+                Self::set_network_last_lock_block(current_block);
+
+                Self::deposit_event(Event::SubnetRegistrationChallenged {
+                    netuid: prune_netuid,
+                    challenger: coldkey,
+                    lock_amount,
+                    deadline,
+                });
+                return Ok(());
+            }
+
             NetworkRegistrationQueue::<T>::mutate(|queue| queue.push(info));
             Self::deposit_event(Event::NetworkRegistrationQueued {
                 coldkey: coldkey.clone(),
@@ -265,6 +292,128 @@ impl<T: Config> Pallet<T> {
         )
         .map(|_| ())
         .map_err(|e| e.error)
+    }
+
+    /// Lets the owner of a challenged subnet keep it by matching the challenger's lock.
+    /// See `match_subnet_registration_challenge` for the full contract.
+    pub fn do_match_subnet_registration_challenge(
+        origin: OriginFor<T>,
+        netuid: NetUid,
+    ) -> DispatchResult {
+        let coldkey = ensure_signed(origin)?;
+
+        ensure!(Self::if_subnet_exist(netuid), Error::<T>::SubnetNotExists);
+
+        let (info, deadline) =
+            ContestedSubnet::<T>::get(netuid).ok_or(Error::<T>::SubnetNotChallenged)?;
+
+        let current_block = Self::get_current_block_as_u64();
+        ensure!(current_block < deadline, Error::<T>::SubnetChallengeExpired);
+        ensure!(
+            SubnetOwner::<T>::get(netuid) == coldkey,
+            Error::<T>::NotSubnetOwner
+        );
+        // `transfer_tao_to_subnet` clamps to the caller's keep-alive balance, so the check has
+        // to use the same preservation mode: an owner who can only reach the lock by spending
+        // their existential deposit has to fail here, before any TAO moves, rather than make a
+        // part payment. The `matched` check below then only guards the clamp itself.
+        ensure!(
+            Self::get_keep_alive_balance(&coldkey) >= info.lock_amount.into(),
+            Error::<T>::CannotAffordLockCost
+        );
+
+        let matched = Self::transfer_tao_to_subnet(netuid, &coldkey, info.lock_amount.into())?;
+        ensure!(
+            matched >= info.lock_amount,
+            Error::<T>::CannotAffordLockCost
+        );
+
+        // A one-sided TAO add against a live pool goes through the balancer, not straight to
+        // `SubnetTAO`, so only the price-active portion lands in the reserve now and the rest
+        // waits in the reservoir. Mirrors how the coinbase adds emission to a subnet pool.
+        // Deliberately no `record_protocol_inflow`: `SubnetProtocolFlow` is the protocol-cost
+        // term subtracted from user demand, and this is user TAO, not minted emission.
+        let (price_active_tao, _) =
+            T::SwapInterface::adjust_protocol_liquidity(netuid, matched, AlphaBalance::ZERO);
+        if !price_active_tao.is_zero() {
+            Self::increase_provided_tao_reserve(netuid, price_active_tao);
+            Self::increase_total_stake(price_active_tao);
+        }
+
+        Self::unlock_network_registration_cost(&info.coldkey, info.lock_id)?;
+        ContestedSubnet::<T>::remove(netuid);
+
+        let immune_until = current_block.saturating_add(Self::get_network_immunity_period());
+        NetworkImmuneUntil::<T>::insert(netuid, immune_until);
+
+        Self::deposit_event(Event::SubnetRegistrationChallengeMatched {
+            netuid,
+            owner: coldkey,
+            challenger: info.coldkey,
+            amount: matched,
+            immune_until,
+        });
+
+        Ok(())
+    }
+
+    /// Resolves one registration challenge whose match window has closed.
+    ///
+    /// Handles at most one challenge per call so the `on_idle` cost stays bounded, which
+    /// is how the dissolve cleanup and registration queues are already drained.
+    pub fn process_subnet_challenges() -> Weight {
+        let db_weight = T::DbWeight::get();
+        let current_block = Self::get_current_block_as_u64();
+        let mut weight = db_weight.reads(1);
+
+        let mut scanned: u64 = 0;
+        let expired = ContestedSubnet::<T>::iter().find(|(_, (_, deadline))| {
+            scanned = scanned.saturating_add(1);
+            current_block >= *deadline
+        });
+        weight.saturating_accrue(db_weight.reads(scanned));
+
+        let Some((netuid, (mut info, _))) = expired else {
+            return weight;
+        };
+
+        // Clear the challenge first, so the dissolution below does not promote this same
+        // registration a second time. The owner declined, so carry out the eviction they
+        // were given the chance to prevent; the registration is promoted either way, so a
+        // failure here cannot strand the challenger's lock.
+        ContestedSubnet::<T>::remove(netuid);
+        if let Err(err) = Self::do_dissolve_network(netuid) {
+            log::error!("Failed to dissolve challenged netuid {netuid:?}: {err:?}");
+        }
+        // `do_dissolve_network` is not benchmarked and returns no weight of its own, so its
+        // roughly 8 reads and 9 writes are charged here rather than left unbilled.
+        weight.saturating_accrue(db_weight.reads_writes(8, 9));
+
+        // The promoted registration's pool is sized from this price, and the parked copy is a
+        // full window stale by now.
+        info.median_subnet_alpha_price = Self::get_median_subnet_alpha_price();
+        Self::queue_parked_registration(info);
+        weight.saturating_accrue(db_weight.reads_writes(2, 2));
+
+        weight
+    }
+
+    /// Moves a registration that was parked against a challenged subnet into the ordinary
+    /// registration queue, which is where a registration that cannot complete immediately
+    /// waits today.
+    pub fn queue_parked_registration(info: NetworkRegistrationInfo<T::AccountId>) {
+        // Emit the same event the ordinary queueing path emits, so a challenger sees one
+        // signal shape whether their registration queued immediately or after a window.
+        Self::deposit_event(Event::NetworkRegistrationQueued {
+            coldkey: info.coldkey.clone(),
+            hotkey: info.hotkey.clone(),
+            mechid: info.mechid,
+            identity: info.identity.clone(),
+            lock_amount: info.lock_amount,
+            median_subnet_alpha_price: info.median_subnet_alpha_price,
+            registration_block: info.registration_block,
+        });
+        NetworkRegistrationQueue::<T>::mutate(|queue| queue.push(info));
     }
 
     pub fn set_new_network_state(

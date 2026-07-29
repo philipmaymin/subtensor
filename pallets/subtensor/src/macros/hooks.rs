@@ -197,6 +197,14 @@ mod hooks {
         fn on_idle(_block: BlockNumberFor<T>, limit: Weight) -> Weight {
             let mut weight = Self::remove_data_for_dissolved_networks(limit);
 
+            // Closes out registration challenges whose match window has lapsed, promoting
+            // the parked registration into the queue drained just below. The dissolution it
+            // queues still has to be cleaned up by a later pass before that registration can
+            // claim the slot, exactly as for any other queued registration.
+            if weight.all_lt(limit) {
+                weight.saturating_accrue(Self::process_subnet_challenges());
+            }
+
             if weight.all_lt(limit) {
                 weight.saturating_accrue(Self::process_network_registration_queue());
             }

@@ -308,10 +308,21 @@ impl<T: Config> Pallet<T> {
                 continue;
             }
 
+            // A subnet already facing a challenge is off the table until that challenge
+            // resolves. Otherwise a second challenger would queue behind the first and
+            // both registrations would hang on the same owner's decision.
+            if ContestedSubnet::<T>::contains_key(netuid) {
+                continue;
+            }
+
             let registered_at = NetworkRegisteredAt::<T>::get(netuid);
 
-            // Skip immune networks.
-            if current_block < registered_at.saturating_add(Self::get_network_immunity_period()) {
+            // Skip immune networks. Immunity is now the later of the registration-derived
+            // window and any window granted by matching a registration challenge.
+            let immune_until = registered_at
+                .saturating_add(Self::get_network_immunity_period())
+                .max(NetworkImmuneUntil::<T>::get(netuid));
+            if current_block < immune_until {
                 continue;
             }
 

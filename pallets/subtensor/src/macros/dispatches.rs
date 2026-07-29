@@ -2508,5 +2508,37 @@ mod dispatches {
         ) -> DispatchResult {
             Self::do_set_min_collateral(origin, netuid, hotkey, min_locked)
         }
+
+        /// Keeps a challenged subnet by matching the challenger's registration lock.
+        ///
+        /// When the subnet limit is reached, a new registration nominates the lowest
+        /// moving-price non-immune subnet for eviction. Rather than dissolving it inside
+        /// that call, the eviction is held open for `SUBNET_CHALLENGE_WINDOW` blocks so the
+        /// incumbent owner can pay the same amount the challenger locked and keep the
+        /// slot. The payment capitalises the subnet's own reserve, the challenger's lock
+        /// is released in full, and the subnet gains a full `NetworkImmunityPeriod`,
+        /// which is the immunity a fresh registration would have received.
+        ///
+        /// # Arguments
+        /// * `origin`: Signed by the subnet's owner coldkey.
+        /// * `netuid`: The challenged subnet.
+        ///
+        /// # Errors
+        /// * `SubnetNotExists`: The subnet was dissolved while contested.
+        /// * `SubnetNotChallenged`: There is no open challenge against `netuid`.
+        /// * `SubnetChallengeExpired`: The match window has already closed.
+        /// * `NotSubnetOwner`: The signer does not own the subnet.
+        /// * `CannotAffordLockCost`: The signer cannot cover the challenger's lock.
+        ///
+        /// # Events
+        /// Emits `SubnetRegistrationChallengeMatched` on success.
+        #[pallet::call_index(146)]
+        #[pallet::weight(<T as crate::pallet::Config>::WeightInfo::match_subnet_registration_challenge())]
+        pub fn match_subnet_registration_challenge(
+            origin: OriginFor<T>,
+            netuid: NetUid,
+        ) -> DispatchResult {
+            Self::do_match_subnet_registration_challenge(origin, netuid)
+        }
     }
 }

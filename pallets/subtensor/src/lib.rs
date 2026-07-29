@@ -2384,6 +2384,31 @@ pub mod pallet {
     pub type NetworkRegistrationQueue<T> =
         StorageValue<_, Vec<NetworkRegistrationInfo<AccountIdOf<T>>>, ValueQuery>;
 
+    /// MAP ( netuid ) --> ( pending registration, challenge deadline )
+    ///
+    /// A registration that would evict `netuid` parks here instead of dissolving it
+    /// outright. The incumbent owner may match the challenger's lock before the
+    /// deadline and keep the subnet; otherwise the dissolution proceeds and the
+    /// parked registration moves to [`NetworkRegistrationQueue`].
+    #[pallet::storage]
+    pub type ContestedSubnet<T: Config> = StorageMap<
+        _,
+        Identity,
+        NetUid,
+        (NetworkRegistrationInfo<AccountIdOf<T>>, u64),
+        OptionQuery,
+    >;
+
+    /// MAP ( netuid ) --> block before which the subnet cannot be pruned
+    ///
+    /// Set when an owner matches a registration challenge. Deliberately separate from
+    /// [`NetworkRegisteredAt`], which is load-bearing for the `start_call` delay, the
+    /// legacy lock-refund flag and the conviction-based ownership handover; none of
+    /// those should move just because immunity was granted.
+    #[pallet::storage]
+    pub type NetworkImmuneUntil<T: Config> =
+        StorageMap<_, Identity, NetUid, u64, ValueQuery, DefaultZeroU64<T>>;
+
     /// MAP ( coldkey ) --> lock_id
     #[pallet::storage]
     pub type NetworkRegistrationLockId<T: Config> = StorageValue<_, u32, ValueQuery>;
