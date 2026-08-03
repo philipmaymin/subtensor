@@ -301,8 +301,46 @@ mod pallet_benchmarks {
         let amount: u64 = 100_000_000_000_000u64.saturating_mul(2);
         add_balance_to_coldkey_account::<T>(&coldkey, amount.into());
 
+        frame_system::Pallet::<T>::set_block_number(1u32.into());
+        fill_subnets_below_limit::<T>(&account("FillOwner", 0, seed));
+
         #[extrinsic_call]
         _(RawOrigin::Signed(coldkey.clone()), hotkey.clone());
+    }
+
+    /// The queueing outcome of `do_register_network`: at `SubnetLimit` the call prunes a subnet and
+    /// queues rather than creating one. Not an extrinsic; it exists so the dispatches that can reach
+    /// this branch have a worst case to charge.
+    ///
+    /// This also covers the third outcome, `wait_to_cleanup`. That path reaches the same queueing
+    /// block without running `get_network_to_prune` or `do_dissolve_network`, so at equal queue
+    /// depth it is strictly cheaper than this one. Queue depth itself is measured at neither: both
+    /// queues are decoded unconditionally on every call and neither is a `BoundedVec`, so there is
+    /// no maximum to benchmark against.
+    #[benchmark]
+    fn register_network_pruning() {
+        let seed: u32 = 1;
+        let coldkey: T::AccountId = account("Test", 0, seed);
+        let hotkey: T::AccountId = account("TestHotkey", 0, seed);
+
+        Subtensor::<T>::set_network_rate_limit(1);
+        let amount: u64 = 100_000_000_000_000u64.saturating_mul(2);
+        add_balance_to_coldkey_account::<T>(&coldkey, amount.into());
+
+        frame_system::Pallet::<T>::set_block_number(1u32.into());
+        fill_subnets_to_limit::<T>(&account("FillOwner", 0, seed));
+
+        #[block]
+        {
+            assert_ok!(Subtensor::<T>::do_register_network(
+                RawOrigin::Signed(coldkey.clone()).into(),
+                &hotkey,
+                1,
+                Some(max_subnet_identity()),
+            ));
+        }
+
+        assert!(!NetworkRegistrationQueue::<T>::get().is_empty());
     }
 
     #[benchmark]
@@ -1449,12 +1487,15 @@ mod pallet_benchmarks {
     fn register_network_with_identity() {
         let coldkey: T::AccountId = whitelisted_caller();
         let hotkey: T::AccountId = account("Alice", 0, 1);
-        let identity: Option<SubnetIdentityOfV3> = None;
+        let identity: Option<SubnetIdentityOfV3> = Some(max_subnet_identity());
 
         Subtensor::<T>::set_network_registration_allowed(1.into(), true);
         Subtensor::<T>::set_network_rate_limit(1);
         let amount: u64 = 9_999_999_999_999;
         add_balance_to_coldkey_account::<T>(&coldkey, amount.into());
+
+        frame_system::Pallet::<T>::set_block_number(1u32.into());
+        fill_subnets_below_limit::<T>(&account("FillOwner", 0, 1));
 
         #[extrinsic_call]
         _(
